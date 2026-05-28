@@ -18,8 +18,8 @@ def achar_arduino():
     keywords = ["USB Serial","Arduino", "ESP", "COM_XX"]
 
     for porta in portas: 
-        for palavra in keywords:
-            if palavra in porta.description:
+        for keyword in keywords:
+            if keyword in porta.description:
                 print(f"Porta conectada: {porta.device}")
                 return porta.device
 
@@ -64,77 +64,81 @@ if not camera.isOpened():
     exit()
 
 # Começa o loop principal
-while camera.isOpened():
-    retorno, frame = camera.read()
+try: 
+    while camera.isOpened():
+        retorno, frame = camera.read()
+        if not retorno:
+            continue
 
-    # Lista do que a câmera achou
-    resultado = modelo(frame, conf=confianca, verbose = False) # verbose é o texto do programa
+        # Lista do que a câmera achou 
+        resultado = modelo(frame, conf=confianca, verbose = False) # verbose é o texto do programa
 
-    # Nome
-    classes = resultado[0].boxes.cls
-    # Confiança
-    confs = resultado[0].boxes.conf
+        # Nome
+        classes = resultado[0].boxes.cls
+        # Confiança
+        confs = resultado[0].boxes.conf
 
-    detectado = None
+        detectado = None
 
-    # Pega a classe de maior confiança
-    if len(confs)>0:
-        maior_classe = confs.argmax()
-        if confs[maior_classe] >= confianca:
-            detectado = modelo.names[int(classes[maior_classe])]
+        # Pega a classe de maior confiança
+        if len(confs)>0:
+            maior_classe = confs.argmax()
+            if confs[maior_classe] >= confianca:
+                detectado = modelo.names[int(classes[maior_classe])]
 
-    # Contagem dos frames detectados e vazios
-    if detectado is not None:
-        cont_frame += 1
-        frame_vazio = 0
-    else:
-        frame_vazio +=1
-        # Se parar de reconhecer, precisa passar da tolerância pra resetar
-        if frame_vazio > tolerancia:
-            cont_frame = 0
+        # Contagem dos frames detectados e vazios
+        if detectado is not None:
+            cont_frame += 1
+            frame_vazio = 0
+        else:
+            frame_vazio +=1
+            # Se parar de reconhecer, precisa passar da tolerância pra resetar
+            if frame_vazio > tolerancia:
+                cont_frame = 0
 
-    # Confirma se passou da contagem
-    if cont_frame>= frame_conf:
-        confirmado = detectado
-    else:
-        confirmado = None
+        # Confirma se passou da contagem
+        if cont_frame>= frame_conf:
+            confirmado = detectado
+        else:
+            confirmado = None
 
-    
-    # Confirmação pra printar só quando mudar de peça
-    if (confirmado is not None) and (confirmado != estado_ant):
-        print(f"Detectado: {confirmado}")
-        estado_ant = confirmado
-        # Envio pro Arduino
-        if arduino.is_open:
-            arduino.write((confirmado + '\n').encode()) # Tirar o \n caso mudar para char no arduino
-            confirmacao = arduino.readline().decode().strip()
-            print(f"Arduino confirmou: {confirmacao}")
-        # Envia pro MQTT
-        if mqtt_connect:
-            envio = client.publish(topic, confirmado)
-            if envio.is_published():
-                print(f"Enviado pro MQTT: {confirmado}")
-            else:
-                print(f"Falha ao enviar pro MQTT: {confirmado}")
+        
+        # Confirmação pra printar só quando mudar de peça
+        if (confirmado is not None) and (confirmado != estado_ant):
+            print(f"Detectado: {confirmado}")
+            estado_ant = confirmado
+            # Envio pro Arduino
+            if arduino.is_open:
+                arduino.write((confirmado + '\n').encode()) # Tirar o \n caso mudar para char no arduino
+                confirmacao = arduino.readline().decode().strip()
+                print(f"Arduino confirmou: {confirmacao}")
+            # Envia pro MQTT
+            if mqtt_connect:
+                envio = client.publish(topic, confirmado)
+                if envio.is_published():
+                    print(f"Enviado pro MQTT: {confirmado}")
+                else:
+                    print(f"Falha ao enviar pro MQTT: {confirmado}")
 
-    
-    # Printa vazio
-    if (frame_vazio >= 15) and (estado_ant is not None):
-        estado_ant = None
-        print("Vazio")
-
-
-# Exibe o frame com as caixas
-    frame_caixa = resultado[0].plot()
-    cv2.imshow("Janela", frame_caixa)
+        
+        # Printa vazio
+        if (frame_vazio >= 15) and (estado_ant is not None):
+            estado_ant = None
+            print("Vazio")
 
 
-# Aperte Q para fechar
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+        # Exibe o frame com as caixas
+        frame_caixa = resultado[0].plot()
+        cv2.imshow("Janela", frame_caixa)
 
-camera.release()
-cv2.destroyAllWindows()
-arduino.close()
-client.loop_stop()
-client.disconnect()
+
+        # Aperte Q para fechar
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+finally:
+    camera.release()
+    cv2.destroyAllWindows()
+    arduino.close()
+    client.loop_stop()
+    client.disconnect()
