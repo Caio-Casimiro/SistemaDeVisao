@@ -4,6 +4,7 @@ from pathlib import Path
 import serial.tools.list_ports
 import serial
 import paho.mqtt.client as mqtt
+import time
 
 #py - m pip install -r requirements.txt
 
@@ -11,32 +12,36 @@ import paho.mqtt.client as mqtt
 pasta = Path(__file__).resolve().parent
 caminho = pasta / "modelo.pt"
 
-# Procura arduino
-def achar_arduino():
-    portas = serial.tools.list_ports.comports()
-
-    keywords = ["USB Serial","Arduino", "ESP", "COM_XX"]
-
-    for porta in portas: 
-        for keyword in keywords:
-            if keyword in porta.description:
-                print(f"Porta conectada: {porta.device}")
-                return porta.device
-
-    print("Nenhum arduino encontrado")
-    exit()
-
-
-# Configurações de arduino, modelo e câmera 
-arduino = serial.Serial(achar_arduino(), 9600, timeout=0.1)
+# Configurações de modelo e câmera 
 modelo = YOLO(caminho)
 camera = cv2.VideoCapture(0)
-
 
 # Definir confiança, frames de confirmação e tolerância
 confianca = 0.8
 frame_conf = 5
 tolerancia = 5
+tempo_parada = 3
+
+# Configurações de Arduino
+portas = serial.tools.list_ports.comports()
+
+keywords = ["USB Serial","Arduino", "ESP", "COM_XX"]
+
+porta_arduino = None
+for porta in portas: 
+    for keyword in keywords:
+        if keyword in porta.description:
+            print(f"Porta conectada: {porta.device}")
+            porta_arduino = porta.device
+
+if porta_arduino is None:
+    print("Nenhum arduino encontrado")
+
+if porta_arduino is not None:
+    arduino = serial.Serial(porta_arduino, 9600, timeout=0.1)
+    arduino_connect =  True
+else: 
+    arduino_connect = False
 
 # Configurações do MQTT
 broker = "broker.hivemq.com"
@@ -52,16 +57,19 @@ except Exception as erro:
     print(f"MQTT não conectado: {erro}")
     mqtt_connect = False
 
-
 # Variaveis iniciais
-estado_ant = None
+confirmado_ant = None
+detectado_ant = None
 cont_frame = 0
 frame_vazio = 0
+tempo_confirmado = 0
+
 
 # Caso não ache a câmera
 if not camera.isOpened():
     print("Câmera não encontrada")
     exit()
+
 
 # Começa o loop principal
 try: 
@@ -70,66 +78,81 @@ try:
         if not retorno:
             continue
 
-        # Lista do que a câmera achou 
-        resultado = modelo(frame, conf=confianca, verbose = False) # verbose é o texto do programa
+        # Só classifica se o tempo desde a última confirmação for maior que o tempo de parada
+        if (time.time() - tempo_confirmado) >= tempo_parada:
+            # Lista do que a câmera achou 
+            resultado = modelo(frame, conf=confianca, verbose = False) # verbose é o texto do programa
 
-        # Nome
-        classes = resultado[0].boxes.cls
-        # Confiança
-        confs = resultado[0].boxes.conf
+            # Nome
+            classes = resultado[0].boxes.cls
+            # Confiança
+            confs = resultado[0].boxes.conf
 
-        detectado = None
+            detectado = None
 
-        # Pega a classe de maior confiança
-        if len(confs)>0:
-            maior_classe = confs.argmax()
-            if confs[maior_classe] >= confianca:
-                detectado = modelo.names[int(classes[maior_classe])]
+            # Pega a classe de maior confiança
+            if len(confs)>0:
+                maior_classe = confs.argmax()
+                if confs[maior_classe] >= confianca:
+                    detectado = modelo.names[int(classes[maior_classe])]
 
-        # Contagem dos frames detectados e vazios
-        if detectado is not None:
-            cont_frame += 1
-            frame_vazio = 0
-        else:
-            frame_vazio +=1
-            # Se parar de reconhecer, precisa passar da tolerância pra resetar
-            if frame_vazio > tolerancia:
-                cont_frame = 0
-
-        # Confirma se passou da contagem
-        if cont_frame>= frame_conf:
-            confirmado = detectado
-        else:
-            confirmado = None
-
-        
-        # Confirmação pra printar só quando mudar de peça
-        if (confirmado is not None) and (confirmado != estado_ant):
-            print(f"Detectado: {confirmado}")
-            estado_ant = confirmado
-            # Envio pro Arduino
-            if arduino.is_open:
-                arduino.write((confirmado + '\n').encode()) # Tirar o \n caso mudar para char no arduino
-                confirmacao = arduino.readline().decode().strip()
-                print(f"Arduino confirmou: {confirmacao}")
-            # Envia pro MQTT
-            if mqtt_connect:
-                envio = client.publish(topic, confirmado)
-                if envio.is_published():
-                    print(f"Enviado pro MQTT: {confirmado}")
+            # Contagem dos frames detectados e vazios
+            if detectado is not None:
+                if detectado == detectado_ant:
+                    # Mesma peça -> continua a contagem
+                    cont_frame += 1
+                    frame_vazio = 0
                 else:
-                    print(f"Falha ao enviar pro MQTT: {confirmado}")
+                    # Outra peça -> reinicia a contagem
+                    detectado_ant = detectado
+                    cont_frame = 1
+                    frame_vazio = 0
 
-        
-        # Printa vazio
-        if (frame_vazio >= 15) and (estado_ant is not None):
-            estado_ant = None
-            print("Vazio")
+            else:
+                frame_vazio +=1
+                # Se parar de reconhecer, precisa passar da tolerância pra resetar
+                if frame_vazio > tolerancia:
+                    cont_frame = 0
+                    detectado_ant = None
 
+            # Confirma se passou da contagem
+            if cont_frame>= frame_conf:
+                confirmado = detectado
+            else:
+                confirmado = None
 
-        # Exibe o frame com as caixas
-        frame_caixa = resultado[0].plot()
-        cv2.imshow("Janela", frame_caixa)
+            
+            # Confirmação pra printar só quando mudar de peça
+            if (confirmado is not None) and (confirmado != confirmado_ant):
+                tempo_confirmado = time.time()
+                print(f"Detectado: {confirmado}")
+                confirmado_ant = confirmado
+                # Envio pro Arduino
+                if arduino_connect:
+                    arduino.write((confirmado + '\n').encode()) # Tirar o \n caso mudar para char no arduino
+                    confirmacao = arduino.readline().decode().strip()
+                    print(f"Arduino confirmou: {confirmacao}")
+                # Envia pro MQTT
+                if mqtt_connect:
+                    envio = client.publish(topic, confirmado)
+                    if envio.is_published():
+                        print(f"Enviado pro MQTT: {confirmado}")
+                    else:
+                        print(f"Falha ao enviar pro MQTT: {confirmado}")
+
+            
+            # Printa vazio
+            if (frame_vazio >= 15) and (confirmado_ant is not None):
+                confirmado_ant = None
+                print("Vazio")
+
+            # Exibe o frame com as caixas
+            frame_caixa = resultado[0].plot()
+
+        else:
+            frame_caixa = frame
+
+        cv2.imshow("Sistema de Visão", frame_caixa)
 
 
         # Aperte Q para fechar
@@ -139,6 +162,8 @@ try:
 finally:
     camera.release()
     cv2.destroyAllWindows()
-    arduino.close()
-    client.loop_stop()
-    client.disconnect()
+    if arduino_connect:
+        arduino.close()
+    if mqtt_connect:
+        client.loop_stop()
+        client.disconnect()
